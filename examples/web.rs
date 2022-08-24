@@ -1,5 +1,3 @@
-#![allow(clippy::single_match)]
-
 use winit::{
     event::{Event, WindowEvent},
     event_loop::EventLoop,
@@ -45,7 +43,6 @@ mod wasm {
     pub fn run() {
         console_log::init_with_level(log::Level::Debug).expect("error initializing logger");
 
-        #[allow(clippy::main_recursion)]
         super::main();
     }
 

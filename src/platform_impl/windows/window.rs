@@ -1,9 +1,7 @@
 #![cfg(target_os = "windows")]
 
 use parking_lot::Mutex;
-use raw_window_handle::{
-    RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
-};
+use raw_window_handle::{RawWindowHandle, Win32Handle};
 use std::{
     cell::Cell,
     ffi::c_void,
@@ -28,10 +26,15 @@ use windows_sys::Win32::{
         Com::{
             CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
         },
+        LibraryLoader::GetModuleHandleW,
         Ole::{OleInitialize, RegisterDragDrop},
     },
     UI::{
         Input::{
+            Ime::{
+                ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT,
+                COMPOSITIONFORM,
+            },
             KeyboardAndMouse::{
                 EnableWindow, GetActiveWindow, MapVirtualKeyW, ReleaseCapture, SendInput, INPUT,
                 INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
@@ -46,8 +49,8 @@ use windows_sys::Win32::{
             SetWindowPlacement, SetWindowPos, SetWindowTextW, CS_HREDRAW, CS_VREDRAW,
             CW_USEDEFAULT, FLASHWINFO, FLASHW_ALL, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY,
             GWLP_HINSTANCE, HTCAPTION, MAPVK_VK_TO_VSC, NID_READY, PM_NOREMOVE, SM_DIGITIZER,
-            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WM_NCLBUTTONDOWN,
-            WNDCLASSEXW,
+            SM_IMMENABLED, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            WM_NCLBUTTONDOWN, WNDCLASSEXW,
         },
     },
 };
@@ -66,12 +69,11 @@ use crate::{
         drop_handler::FileDropHandler,
         event_loop::{self, EventLoopWindowTarget, DESTROY_MSG_ID},
         icon::{self, IconType},
-        ime::ImeContext,
         monitor, util,
         window_state::{CursorFlags, SavedWindow, WindowFlags, WindowState},
         Parent, PlatformSpecificWindowBuilderAttributes, WindowId,
     },
-    window::{CursorGrabMode, CursorIcon, Fullscreen, Theme, UserAttentionType, WindowAttributes},
+    window::{CursorIcon, Fullscreen, Theme, UserAttentionType, WindowAttributes},
 };
 
 /// The Win32 implementation of the main `Window` object.
@@ -87,7 +89,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub(crate) fn new<T: 'static>(
+    pub fn new<T: 'static>(
         event_loop: &EventLoopWindowTarget<T>,
         w_attr: WindowAttributes,
         pl_attr: PlatformSpecificWindowBuilderAttributes,
@@ -132,7 +134,7 @@ impl Window {
 
     #[inline]
     pub fn outer_position(&self) -> Result<PhysicalPosition<i32>, NotSupportedError> {
-        util::WindowArea::Outer.get_rect(self.hwnd())
+        util::get_window_rect(self.hwnd())
             .map(|rect| Ok(PhysicalPosition::new(rect.left as i32, rect.top as i32)))
             .expect("Unexpected GetWindowRect failure; please report this error to https://github.com/rust-windowing/winit")
     }
@@ -187,8 +189,7 @@ impl Window {
 
     #[inline]
     pub fn outer_size(&self) -> PhysicalSize<u32> {
-        util::WindowArea::Outer
-            .get_rect(self.hwnd())
+        util::get_window_rect(self.hwnd())
             .map(|rect| {
                 PhysicalSize::new(
                     (rect.right - rect.left) as u32,
@@ -201,7 +202,7 @@ impl Window {
     #[inline]
     pub fn set_inner_size(&self, size: Size) {
         let scale_factor = self.scale_factor();
-        let physical_size = size.to_physical::<u32>(scale_factor);
+        let (width, height) = size.to_physical::<u32>(scale_factor).into();
 
         let window_state = Arc::clone(&self.window_state);
         let window = self.window.clone();
@@ -212,8 +213,7 @@ impl Window {
             });
         });
 
-        let window_flags = self.window_state.lock().window_flags;
-        window_flags.set_size(self.hwnd(), physical_size);
+        util::set_inner_size_physical(self.hwnd(), width, height);
     }
 
     #[inline]
@@ -264,15 +264,10 @@ impl Window {
 
     #[inline]
     pub fn raw_window_handle(&self) -> RawWindowHandle {
-        let mut window_handle = Win32WindowHandle::empty();
-        window_handle.hwnd = self.window.0 as *mut _;
-        window_handle.hinstance = self.hinstance() as *mut _;
-        RawWindowHandle::Win32(window_handle)
-    }
-
-    #[inline]
-    pub fn raw_display_handle(&self) -> RawDisplayHandle {
-        RawDisplayHandle::Windows(WindowsDisplayHandle::empty())
+        let mut handle = Win32Handle::empty();
+        handle.hwnd = self.window.0 as *mut _;
+        handle.hinstance = self.hinstance() as *mut _;
+        RawWindowHandle::Win32(handle)
     }
 
     #[inline]
@@ -285,15 +280,7 @@ impl Window {
     }
 
     #[inline]
-    pub fn set_cursor_grab(&self, mode: CursorGrabMode) -> Result<(), ExternalError> {
-        let confine = match mode {
-            CursorGrabMode::None => false,
-            CursorGrabMode::Confined => true,
-            CursorGrabMode::Locked => {
-                return Err(ExternalError::NotSupported(NotSupportedError::new()))
-            }
-        };
-
+    pub fn set_cursor_grab(&self, grab: bool) -> Result<(), ExternalError> {
         let window = self.window.clone();
         let window_state = Arc::clone(&self.window_state);
         let (tx, rx) = channel();
@@ -303,7 +290,7 @@ impl Window {
             let result = window_state
                 .lock()
                 .mouse
-                .set_cursor_flags(window.0, |f| f.set(CursorFlags::GRABBED, confine))
+                .set_cursor_flags(window.0, |f| f.set(CursorFlags::GRABBED, grab))
                 .map_err(|e| ExternalError::Os(os_error!(e)));
             let _ = tx.send(result);
         });
@@ -579,7 +566,7 @@ impl Window {
         self.thread_executor.execute_in_thread(move || {
             let _ = &window;
             WindowState::set_window_flags(window_state.lock(), window.0, |f| {
-                f.set(WindowFlags::MARKER_DECORATIONS, decorations)
+                f.set(WindowFlags::DECORATIONS, decorations)
             });
         });
     }
@@ -587,9 +574,7 @@ impl Window {
     #[inline]
     pub fn is_decorated(&self) -> bool {
         let window_state = self.window_state.lock();
-        window_state
-            .window_flags
-            .contains(WindowFlags::MARKER_DECORATIONS)
+        window_state.window_flags.contains(WindowFlags::DECORATIONS)
     }
 
     #[inline]
@@ -641,19 +626,25 @@ impl Window {
         self.window_state.lock().taskbar_icon = taskbar_icon;
     }
 
-    #[inline]
-    pub fn set_ime_position(&self, spot: Position) {
-        unsafe {
-            ImeContext::current(self.hwnd()).set_ime_position(spot, self.scale_factor());
+    pub(crate) fn set_ime_position_physical(&self, x: i32, y: i32) {
+        if unsafe { GetSystemMetrics(SM_IMMENABLED) } != 0 {
+            let composition_form = COMPOSITIONFORM {
+                dwStyle: CFS_POINT,
+                ptCurrentPos: POINT { x, y },
+                rcArea: unsafe { mem::zeroed() },
+            };
+            unsafe {
+                let himc = ImmGetContext(self.hwnd());
+                ImmSetCompositionWindow(himc, &composition_form);
+                ImmReleaseContext(self.hwnd(), himc);
+            }
         }
     }
 
     #[inline]
-    pub fn set_ime_allowed(&self, allowed: bool) {
-        self.window_state.lock().ime_allowed = allowed;
-        unsafe {
-            ImeContext::set_ime_allowed(self.hwnd(), allowed);
-        }
+    pub fn set_ime_position(&self, spot: Position) {
+        let (x, y) = spot.to_physical::<i32>(self.scale_factor()).into();
+        self.set_ime_position_physical(x, y);
     }
 
     #[inline]
@@ -691,21 +682,39 @@ impl Window {
 
     #[inline]
     pub fn set_skip_taskbar(&self, skip: bool) {
-        self.window_state.lock().skip_taskbar = skip;
-        unsafe { set_skip_taskbar(self.hwnd(), skip) };
-    }
+        com_initialized();
+        unsafe {
+            TASKBAR_LIST.with(|task_bar_list_ptr| {
+                let mut task_bar_list = task_bar_list_ptr.get();
 
-    #[inline]
-    pub fn set_undecorated_shadow(&self, shadow: bool) {
-        let window = self.window.clone();
-        let window_state = Arc::clone(&self.window_state);
+                if task_bar_list.is_null() {
+                    let hr = CoCreateInstance(
+                        &CLSID_TaskbarList,
+                        ptr::null_mut(),
+                        CLSCTX_ALL,
+                        &IID_ITaskbarList,
+                        &mut task_bar_list as *mut _ as *mut _,
+                    );
 
-        self.thread_executor.execute_in_thread(move || {
-            let _ = &window;
-            WindowState::set_window_flags(window_state.lock(), window.0, |f| {
-                f.set(WindowFlags::MARKER_UNDECORATED_SHADOW, shadow)
+                    let hr_init = (*(*task_bar_list).lpVtbl).HrInit;
+
+                    if hr != S_OK || hr_init(task_bar_list.cast()) != S_OK {
+                        // In some old windows, the taskbar object could not be created, we just ignore it
+                        return;
+                    }
+                    task_bar_list_ptr.set(task_bar_list)
+                }
+
+                task_bar_list = task_bar_list_ptr.get();
+                if skip {
+                    let delete_tab = (*(*task_bar_list).lpVtbl).DeleteTab;
+                    delete_tab(task_bar_list, self.window.0);
+                } else {
+                    let add_tab = (*(*task_bar_list).lpVtbl).AddTab;
+                    add_tab(task_bar_list, self.window.0);
+                }
             });
-        });
+        }
     }
 
     #[inline]
@@ -788,8 +797,6 @@ impl<'a, T: 'static> InitData<'a, T> {
         };
 
         enable_non_client_dpi_scaling(window);
-
-        ImeContext::set_ime_allowed(window, false);
 
         Window {
             window: WindowWrapper(window),
@@ -896,17 +903,10 @@ impl<'a, T: 'static> InitData<'a, T> {
             win.set_fullscreen(attributes.fullscreen);
             force_window_active(win.window.0);
         } else {
-            let size = attributes
+            let dimensions = attributes
                 .inner_size
                 .unwrap_or_else(|| PhysicalSize::new(800, 600).into());
-            let max_size = attributes
-                .max_inner_size
-                .unwrap_or_else(|| PhysicalSize::new(f64::MAX, f64::MAX).into());
-            let min_size = attributes
-                .min_inner_size
-                .unwrap_or_else(|| PhysicalSize::new(0, 0).into());
-            let clamped_size = Size::clamp(size, min_size, max_size, win.scale_factor());
-            win.set_inner_size(clamped_size);
+            win.set_inner_size(dimensions);
 
             if attributes.maximized {
                 // Need to set MAXIMIZED after setting `inner_size` as
@@ -914,14 +914,6 @@ impl<'a, T: 'static> InitData<'a, T> {
                 win.set_maximized(true);
             }
         }
-
-        // let margins = MARGINS {
-        //     cxLeftWidth: 1,
-        //     cxRightWidth: 1,
-        //     cyTopHeight: 1,
-        //     cyBottomHeight: 1,
-        // };
-        // dbg!(DwmExtendFrameIntoClientArea(win.hwnd(), &margins as *const _));
 
         if let Some(position) = attributes.position {
             win.set_outer_position(position);
@@ -941,11 +933,7 @@ where
     let class_name = register_window_class::<T>(&attributes.window_icon, &pl_attribs.taskbar_icon);
 
     let mut window_flags = WindowFlags::empty();
-    window_flags.set(WindowFlags::MARKER_DECORATIONS, attributes.decorations);
-    window_flags.set(
-        WindowFlags::MARKER_UNDECORATED_SHADOW,
-        pl_attribs.decoration_shadow,
-    );
+    window_flags.set(WindowFlags::DECORATIONS, attributes.decorations);
     window_flags.set(WindowFlags::ALWAYS_ON_TOP, attributes.always_on_top);
     window_flags.set(
         WindowFlags::NO_BACK_BUFFER,
@@ -993,7 +981,7 @@ where
         CW_USEDEFAULT,
         parent.unwrap_or(0),
         pl_attribs.menu.unwrap_or(0),
-        util::get_instance_handle(),
+        GetModuleHandleW(ptr::null()),
         &mut initdata as *mut _ as *mut _,
     );
 
@@ -1026,17 +1014,16 @@ unsafe fn register_window_class<T: 'static>(
         .map(|icon| icon.inner.as_raw_handle())
         .unwrap_or(0);
 
-    use windows_sys::Win32::UI::WindowsAndMessaging::COLOR_WINDOWFRAME;
     let class = WNDCLASSEXW {
         cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(super::event_loop::public_window_callback::<T>),
         cbClsExtra: 0,
         cbWndExtra: 0,
-        hInstance: util::get_instance_handle(),
+        hInstance: GetModuleHandleW(ptr::null()),
         hIcon: h_icon,
         hCursor: 0, // must be null in order for cursor state to work properly
-        hbrBackground: COLOR_WINDOWFRAME as _,
+        hbrBackground: 0,
         lpszMenuName: ptr::null(),
         lpszClassName: class_name.as_ptr(),
         hIconSm: h_icon_small,
@@ -1110,40 +1097,6 @@ unsafe fn taskbar_mark_fullscreen(handle: HWND, fullscreen: bool) {
         let mark_fullscreen_window = (*(*task_bar_list2).lpVtbl).MarkFullscreenWindow;
         mark_fullscreen_window(task_bar_list2, handle, if fullscreen { 1 } else { 0 });
     })
-}
-
-pub(crate) unsafe fn set_skip_taskbar(hwnd: HWND, skip: bool) {
-    com_initialized();
-    TASKBAR_LIST.with(|task_bar_list_ptr| {
-        let mut task_bar_list = task_bar_list_ptr.get();
-
-        if task_bar_list.is_null() {
-            let hr = CoCreateInstance(
-                &CLSID_TaskbarList,
-                ptr::null_mut(),
-                CLSCTX_ALL,
-                &IID_ITaskbarList,
-                &mut task_bar_list as *mut _ as *mut _,
-            );
-
-            let hr_init = (*(*task_bar_list).lpVtbl).HrInit;
-
-            if hr != S_OK || hr_init(task_bar_list.cast()) != S_OK {
-                // In some old windows, the taskbar object could not be created, we just ignore it
-                return;
-            }
-            task_bar_list_ptr.set(task_bar_list)
-        }
-
-        task_bar_list = task_bar_list_ptr.get();
-        if skip {
-            let delete_tab = (*(*task_bar_list).lpVtbl).DeleteTab;
-            delete_tab(task_bar_list, hwnd);
-        } else {
-            let add_tab = (*(*task_bar_list).lpVtbl).AddTab;
-            add_tab(task_bar_list, hwnd);
-        }
-    });
 }
 
 unsafe fn force_window_active(handle: HWND) {

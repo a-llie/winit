@@ -1,5 +1,6 @@
 use simple_logger::SimpleLogger;
 use winit::{
+    dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::WindowBuilder,
@@ -9,11 +10,10 @@ fn main() {
     SimpleLogger::new().init().unwrap();
     let event_loop = EventLoop::new();
 
-    let window = WindowBuilder::new()
-        .with_title("A fantastic window!")
-        .with_inner_size(winit::dpi::LogicalSize::new(128.0, 128.0))
-        .build(&event_loop)
-        .unwrap();
+    let window = WindowBuilder::new().build(&event_loop).unwrap();
+
+    window.set_min_inner_size(Some(LogicalSize::new(400.0, 200.0)));
+    window.set_max_inner_size(Some(LogicalSize::new(800.0, 400.0)));
 
     event_loop.run(move |event, _, control_flow| {
         control_flow.set_wait();
@@ -22,11 +22,8 @@ fn main() {
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
-                window_id,
-            } if window_id == window.id() => control_flow.set_exit(),
-            Event::MainEventsCleared => {
-                window.request_redraw();
-            }
+                ..
+            } => control_flow.set_exit(),
             _ => (),
         }
     });

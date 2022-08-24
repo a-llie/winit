@@ -65,7 +65,7 @@ impl<T: 'static> Runner<T> {
         }
     }
 
-    /// Returns the corresponding `StartCause` for the current `state`, or `None`
+    /// Returns the cooresponding `StartCause` for the current `state`, or `None`
     /// when in `Exit` state.
     fn maybe_start_cause(&self) -> Option<StartCause> {
         Some(match self.state {
@@ -158,9 +158,8 @@ impl<T: 'static> Shared<T> {
     }
 
     pub fn init(&self) {
-        // NB: For consistency all platforms must emit a 'resumed' event even though web
-        // applications don't themselves have a formal suspend/resume lifecycle.
-        self.run_until_cleared([Event::NewEvents(StartCause::Init), Event::Resumed].into_iter());
+        let start_cause = Event::NewEvents(StartCause::Init);
+        self.run_until_cleared(iter::once(start_cause));
     }
 
     // Run the polling logic for the Poll ControlFlow, which involves clearing the queue
@@ -457,8 +456,11 @@ impl<T: 'static> Shared<T> {
             ControlFlow::ExitWithCode(_) => State::Exit,
         };
 
-        if let RunnerEnum::Running(ref mut runner) = *self.0.runner.borrow_mut() {
-            runner.state = new_state;
+        match *self.0.runner.borrow_mut() {
+            RunnerEnum::Running(ref mut runner) => {
+                runner.state = new_state;
+            }
+            _ => (),
         }
     }
 

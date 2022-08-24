@@ -12,23 +12,20 @@ use super::{
 
 use util::modifiers::{ModifierKeyState, ModifierKeymap};
 
-use crate::platform_impl::platform::x11::ime::{ImeEvent, ImeEventReceiver, ImeRequest};
 use crate::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{
-        DeviceEvent, ElementState, Event, Ime, KeyboardInput, ModifiersState, TouchPhase,
-        WindowEvent,
+        DeviceEvent, ElementState, Event, KeyboardInput, ModifiersState, TouchPhase, WindowEvent,
     },
     event_loop::EventLoopWindowTarget as RootELW,
 };
 
-/// The X11 documentation states: "Keycodes lie in the inclusive range `[8, 255]`".
+/// The X11 documentation states: "Keycodes lie in the inclusive range [8,255]".
 const KEYCODE_OFFSET: u8 = 8;
 
 pub(super) struct EventProcessor<T: 'static> {
     pub(super) dnd: Dnd,
     pub(super) ime_receiver: ImeReceiver,
-    pub(super) ime_event_receiver: ImeEventReceiver,
     pub(super) randr_event_offset: c_int,
     pub(super) devices: RefCell<HashMap<DeviceId, Device>>,
     pub(super) xi2ext: XExtension,
@@ -40,7 +37,6 @@ pub(super) struct EventProcessor<T: 'static> {
     pub(super) first_touch: Option<u64>,
     // Currently focused window belonging to this process
     pub(super) active_window: Option<ffi::Window>,
-    pub(super) is_composing: bool,
 }
 
 impl<T: 'static> EventProcessor<T> {
@@ -49,7 +45,7 @@ impl<T: 'static> EventProcessor<T> {
         let mut devices = self.devices.borrow_mut();
         if let Some(info) = DeviceInfo::get(&wt.xconn, device) {
             for info in info.iter() {
-                devices.insert(DeviceId(info.deviceid), Device::new(info));
+                devices.insert(DeviceId(info.deviceid), Device::new(self, info));
             }
         }
     }
@@ -59,7 +55,7 @@ impl<T: 'static> EventProcessor<T> {
         F: Fn(&Arc<UnownedWindow>) -> Ret,
     {
         let mut deleted = false;
-        let window_id = WindowId(window_id as u64);
+        let window_id = WindowId(window_id);
         let wt = get_xtarget(&self.target);
         let result = wt
             .windows
@@ -414,7 +410,7 @@ impl<T: 'static> EventProcessor<T> {
                         // resizing by dragging across monitors *without* dropping the window.
                         let (width, height) = shared_state_lock
                             .dpi_adjusted
-                            .unwrap_or((xev.width as u32, xev.height as u32));
+                            .unwrap_or_else(|| (xev.width as u32, xev.height as u32));
 
                         let last_scale_factor = shared_state_lock.last_monitor.scale_factor;
                         let new_scale_factor = {
@@ -513,7 +509,7 @@ impl<T: 'static> EventProcessor<T> {
 
                 // In the event that the window's been destroyed without being dropped first, we
                 // cleanup again here.
-                wt.windows.borrow_mut().remove(&WindowId(window as u64));
+                wt.windows.borrow_mut().remove(&WindowId(window));
 
                 // Since all XIM stuff needs to happen from the same thread, we destroy the input
                 // context here instead of when dropping the window.
@@ -531,13 +527,8 @@ impl<T: 'static> EventProcessor<T> {
             ffi::VisibilityNotify => {
                 let xev: &ffi::XVisibilityEvent = xev.as_ref();
                 let xwindow = xev.window;
-                callback(Event::WindowEvent {
-                    window_id: mkwid(xwindow),
-                    event: WindowEvent::Occluded(xev.state == ffi::VisibilityFullyObscured),
-                });
-                self.with_window(xwindow, |window| {
-                    window.visibility_notify();
-                });
+
+                self.with_window(xwindow, |window| window.visibility_notify());
             }
 
             ffi::Expose => {
@@ -576,7 +567,7 @@ impl<T: 'static> EventProcessor<T> {
 
                 // When a compose sequence or IME pre-edit is finished, it ends in a KeyPress with
                 // a keycode of 0.
-                if keycode != 0 && !self.is_composing {
+                if keycode != 0 {
                     let scancode = keycode - KEYCODE_OFFSET as u32;
                     let keysym = wt.xconn.lookup_keysym(xkev);
                     let virtual_keycode = events::keysym_to_element(keysym as c_uint);
@@ -611,25 +602,12 @@ impl<T: 'static> EventProcessor<T> {
                         return;
                     };
 
-                    // If we're composing right now, send the string we've got from X11 via
-                    // Ime::Commit.
-                    if self.is_composing && keycode == 0 && !written.is_empty() {
+                    for chr in written.chars() {
                         let event = Event::WindowEvent {
                             window_id,
-                            event: WindowEvent::Ime(Ime::Commit(written)),
+                            event: WindowEvent::ReceivedCharacter(chr),
                         };
-
-                        self.is_composing = false;
                         callback(event);
-                    } else {
-                        for chr in written.chars() {
-                            let event = Event::WindowEvent {
-                                window_id,
-                                event: WindowEvent::ReceivedCharacter(chr),
-                            };
-
-                            callback(event);
-                        }
                     }
                 }
             }
@@ -912,8 +890,6 @@ impl<T: 'static> EventProcessor<T> {
                         if self.active_window != Some(xev.event) {
                             self.active_window = Some(xev.event);
 
-                            wt.update_device_event_filter(true);
-
                             let window_id = mkwid(xev.event);
                             let position = PhysicalPosition::new(xev.event_x, xev.event_y);
 
@@ -963,7 +939,6 @@ impl<T: 'static> EventProcessor<T> {
                         if !self.window_exists(xev.event) {
                             return;
                         }
-
                         wt.ime
                             .borrow_mut()
                             .unfocus(xev.event)
@@ -971,8 +946,6 @@ impl<T: 'static> EventProcessor<T> {
 
                         if self.active_window.take() == Some(xev.event) {
                             let window_id = mkwid(xev.event);
-
-                            wt.update_device_event_filter(false);
 
                             // Issue key release events for all pressed keys
                             Self::handle_pressed_keys(
@@ -1218,7 +1191,11 @@ impl<T: 'static> EventProcessor<T> {
                                                 &*window.shared_state.lock(),
                                             );
 
-                                            let window_id = crate::window::WindowId(*window_id);
+                                            let window_id = crate::window::WindowId(
+                                                crate::platform_impl::platform::WindowId::X(
+                                                    *window_id,
+                                                ),
+                                            );
                                             let old_inner_size = PhysicalSize::new(width, height);
                                             let mut new_inner_size =
                                                 PhysicalSize::new(new_width, new_height);
@@ -1246,61 +1223,8 @@ impl<T: 'static> EventProcessor<T> {
             }
         }
 
-        // Handle IME requests.
-        if let Ok(request) = self.ime_receiver.try_recv() {
-            let mut ime = wt.ime.borrow_mut();
-            match request {
-                ImeRequest::Position(window_id, x, y) => {
-                    ime.send_xim_spot(window_id, x, y);
-                }
-                ImeRequest::Allow(window_id, allowed) => {
-                    ime.set_ime_allowed(window_id, allowed);
-                }
-            }
-        }
-
-        let (window, event) = match self.ime_event_receiver.try_recv() {
-            Ok((window, event)) => (window, event),
-            Err(_) => return,
-        };
-
-        match event {
-            ImeEvent::Enabled => {
-                callback(Event::WindowEvent {
-                    window_id: mkwid(window),
-                    event: WindowEvent::Ime(Ime::Enabled),
-                });
-            }
-            ImeEvent::Start => {
-                self.is_composing = true;
-                callback(Event::WindowEvent {
-                    window_id: mkwid(window),
-                    event: WindowEvent::Ime(Ime::Preedit("".to_owned(), None)),
-                });
-            }
-            ImeEvent::Update(text, position) => {
-                if self.is_composing {
-                    callback(Event::WindowEvent {
-                        window_id: mkwid(window),
-                        event: WindowEvent::Ime(Ime::Preedit(text, Some((position, position)))),
-                    });
-                }
-            }
-            ImeEvent::End => {
-                self.is_composing = false;
-                // Issue empty preedit on `Done`.
-                callback(Event::WindowEvent {
-                    window_id: mkwid(window),
-                    event: WindowEvent::Ime(Ime::Preedit(String::new(), None)),
-                });
-            }
-            ImeEvent::Disabled => {
-                self.is_composing = false;
-                callback(Event::WindowEvent {
-                    window_id: mkwid(window),
-                    event: WindowEvent::Ime(Ime::Disabled),
-                });
-            }
+        if let Ok((window_id, x, y)) = self.ime_receiver.try_recv() {
+            wt.ime.borrow_mut().send_xim_spot(window_id, x, y);
         }
     }
 

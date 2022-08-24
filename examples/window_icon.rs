@@ -1,5 +1,4 @@
-#![allow(clippy::single_match)]
-
+extern crate image;
 use std::path::Path;
 
 use simple_logger::SimpleLogger;

@@ -1,5 +1,3 @@
-#![allow(clippy::single_match)]
-
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     use std::{collections::HashMap, sync::mpsc, thread, time::Duration};
@@ -9,7 +7,7 @@ fn main() {
         dpi::{PhysicalPosition, PhysicalSize, Position, Size},
         event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent},
         event_loop::EventLoop,
-        window::{CursorGrabMode, CursorIcon, Fullscreen, WindowBuilder},
+        window::{CursorIcon, Fullscreen, WindowBuilder},
     };
 
     const WINDOW_COUNT: usize = 3;
@@ -88,21 +86,7 @@ fn main() {
                                 }
                                 (false, _) => None,
                             }),
-                            L if state => {
-                                if let Err(err) = window.set_cursor_grab(CursorGrabMode::Locked) {
-                                    println!("error: {}", err);
-                                }
-                            }
-                            G if state => {
-                                if let Err(err) = window.set_cursor_grab(CursorGrabMode::Confined) {
-                                    println!("error: {}", err);
-                                }
-                            }
-                            G | L if !state => {
-                                if let Err(err) = window.set_cursor_grab(CursorGrabMode::None) {
-                                    println!("error: {}", err);
-                                }
-                            }
+                            G => window.set_cursor_grab(state).unwrap(),
                             H => window.set_cursor_visible(!state),
                             I => {
                                 println!("Info:");

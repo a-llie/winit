@@ -1,5 +1,3 @@
-#![allow(clippy::single_match)]
-
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     use simple_logger::SimpleLogger;

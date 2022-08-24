@@ -1,5 +1,3 @@
-#![allow(clippy::single_match)]
-
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     use std::{thread, time};
@@ -30,10 +28,10 @@ fn main() {
         control_flow.set_wait();
 
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => control_flow.set_exit(),
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => control_flow.set_exit(),
+                _ => (),
+            },
             Event::RedrawRequested(_) => {
                 println!("\nredrawing!\n");
             }

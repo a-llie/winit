@@ -167,15 +167,11 @@ pub unsafe fn set_maximized_async(
 
             shared_state_lock.maximized = maximized;
 
+            let curr_mask = ns_window.styleMask();
             if shared_state_lock.fullscreen.is_some() {
                 // Handle it in window_did_exit_fullscreen
                 return;
-            }
-
-            if ns_window
-                .styleMask()
-                .contains(NSWindowStyleMask::NSResizableWindowMask)
-            {
+            } else if curr_mask.contains(NSWindowStyleMask::NSResizableWindowMask) {
                 // Just use the native zoom if resizable
                 ns_window.zoom_(nil);
             } else {

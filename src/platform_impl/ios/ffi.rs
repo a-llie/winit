@@ -88,7 +88,7 @@ pub enum UITouchPhase {
     Cancelled,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 #[allow(dead_code)]
 #[repr(isize)]
 pub enum UIForceTouchCapability {
@@ -97,7 +97,7 @@ pub enum UIForceTouchCapability {
     Available,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 #[allow(dead_code)]
 #[repr(isize)]
 pub enum UITouchType {
@@ -144,9 +144,10 @@ impl From<Idiom> for UIUserInterfaceIdiom {
         }
     }
 }
-impl From<UIUserInterfaceIdiom> for Idiom {
-    fn from(ui_idiom: UIUserInterfaceIdiom) -> Idiom {
-        match ui_idiom {
+
+impl Into<Idiom> for UIUserInterfaceIdiom {
+    fn into(self) -> Idiom {
+        match self {
             UIUserInterfaceIdiom::Unspecified => Idiom::Unspecified,
             UIUserInterfaceIdiom::Phone => Idiom::Phone,
             UIUserInterfaceIdiom::Pad => Idiom::Pad,
@@ -229,9 +230,9 @@ impl From<ScreenEdge> for UIRectEdge {
     }
 }
 
-impl From<UIRectEdge> for ScreenEdge {
-    fn from(ui_rect_edge: UIRectEdge) -> ScreenEdge {
-        let bits: u8 = ui_rect_edge.0.try_into().expect("invalid `UIRectEdge`");
+impl Into<ScreenEdge> for UIRectEdge {
+    fn into(self) -> ScreenEdge {
+        let bits: u8 = self.0.try_into().expect("invalid `UIRectEdge`");
         ScreenEdge::from_bits(bits).expect("invalid `ScreenEdge`")
     }
 }

@@ -10,7 +10,6 @@ use std::{
 };
 
 use objc::runtime::{BOOL, YES};
-use once_cell::sync::Lazy;
 
 use crate::{
     dpi::LogicalSize,
@@ -53,7 +52,11 @@ enum UserCallbackTransitionResult<'a> {
 
 impl Event<'static, Never> {
     fn is_redraw(&self) -> bool {
-        matches!(self, Event::RedrawRequested(_))
+        if let Event::RedrawRequested(_) = self {
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -116,7 +119,7 @@ impl Drop for AppState {
             } => {
                 for &mut window in queued_windows {
                     unsafe {
-                        let _: () = msg_send![window, release];
+                        let () = msg_send![window, release];
                     }
                 }
             }
@@ -197,10 +200,10 @@ impl AppState {
     }
 
     fn has_launched(&self) -> bool {
-        !matches!(
-            self.state(),
-            AppStateImpl::NotLaunched { .. } | AppStateImpl::Launching { .. }
-        )
+        match self.state() {
+            &AppStateImpl::NotLaunched { .. } | &AppStateImpl::Launching { .. } => false,
+            _ => true,
+        }
     }
 
     fn will_launch_transition(&mut self, queued_event_handler: Box<dyn EventHandler>) {
@@ -525,9 +528,7 @@ pub unsafe fn queue_gl_or_metal_redraw(window: id) {
         | &mut AppStateImpl::InUserCallback {
             ref mut queued_gpu_redraws,
             ..
-        } => {
-            let _ = queued_gpu_redraws.insert(window);
-        }
+        } => drop(queued_gpu_redraws.insert(window)),
         s @ &mut AppStateImpl::ProcessingRedraws { .. }
         | s @ &mut AppStateImpl::Waiting { .. }
         | s @ &mut AppStateImpl::PollFinished { .. } => bug!("unexpected state {:?}", s),
@@ -535,7 +536,6 @@ pub unsafe fn queue_gl_or_metal_redraw(window: id) {
             panic!("Attempt to create a `Window` after the app has terminated")
         }
     }
-
     drop(this);
 }
 
@@ -548,7 +548,7 @@ pub unsafe fn will_launch(queued_event_handler: Box<dyn EventHandler>) {
 pub unsafe fn did_finish_launching() {
     let mut this = AppState::get_mut();
     let windows = match this.state_mut() {
-        AppStateImpl::Launching { queued_windows, .. } => mem::take(queued_windows),
+        AppStateImpl::Launching { queued_windows, .. } => mem::replace(queued_windows, Vec::new()),
         s => bug!("unexpected state {:?}", s),
     };
 
@@ -578,15 +578,15 @@ pub unsafe fn did_finish_launching() {
             // ```
             let screen: id = msg_send![window, screen];
             let _: id = msg_send![screen, retain];
-            let _: () = msg_send![window, setScreen:0 as id];
-            let _: () = msg_send![window, setScreen: screen];
-            let _: () = msg_send![screen, release];
+            let () = msg_send![window, setScreen:0 as id];
+            let () = msg_send![window, setScreen: screen];
+            let () = msg_send![screen, release];
             let controller: id = msg_send![window, rootViewController];
-            let _: () = msg_send![window, setRootViewController:ptr::null::<()>()];
-            let _: () = msg_send![window, setRootViewController: controller];
-            let _: () = msg_send![window, makeKeyAndVisible];
+            let () = msg_send![window, setRootViewController:ptr::null::<()>()];
+            let () = msg_send![window, setRootViewController: controller];
+            let () = msg_send![window, makeKeyAndVisible];
         }
-        let _: () = msg_send![window, release];
+        let () = msg_send![window, release];
     }
 
     let (windows, events) = AppState::get_mut().did_finish_launching_transition();
@@ -603,9 +603,9 @@ pub unsafe fn did_finish_launching() {
         let count: NSUInteger = msg_send![window, retainCount];
         // make sure the window is still referenced
         if count > 1 {
-            let _: () = msg_send![window, makeKeyAndVisible];
+            let () = msg_send![window, makeKeyAndVisible];
         }
-        let _: () = msg_send![window, release];
+        let () = msg_send![window, release];
     }
 }
 
@@ -670,7 +670,7 @@ pub unsafe fn handle_nonuser_events<I: IntoIterator<Item = EventWrapper>>(events
             &mut AppStateImpl::InUserCallback {
                 ref mut queued_events,
                 queued_gpu_redraws: _,
-            } => mem::take(queued_events),
+            } => mem::replace(queued_events, Vec::new()),
             s => bug!("unexpected state {:?}", s),
         };
         if queued_events.is_empty() {
@@ -751,7 +751,7 @@ unsafe fn handle_user_events() {
             &mut AppStateImpl::InUserCallback {
                 ref mut queued_events,
                 queued_gpu_redraws: _,
-            } => mem::take(queued_events),
+            } => mem::replace(queued_events, Vec::new()),
             s => bug!("unexpected state {:?}", s),
         };
         if queued_events.is_empty() {
@@ -793,7 +793,7 @@ pub unsafe fn handle_main_events_cleared() {
         return;
     }
     match this.state_mut() {
-        AppStateImpl::ProcessingEvents { .. } => {}
+        &mut AppStateImpl::ProcessingEvents { .. } => {}
         _ => bug!("`ProcessingRedraws` happened unexpectedly"),
     };
     drop(this);
@@ -875,7 +875,7 @@ fn handle_hidpi_proxy(
     let size = CGSize::new(logical_size);
     let new_frame: CGRect = CGRect::new(screen_frame.origin, size);
     unsafe {
-        let _: () = msg_send![view, setFrame: new_frame];
+        let () = msg_send![view, setFrame: new_frame];
     }
 }
 
@@ -990,20 +990,20 @@ macro_rules! os_capabilities {
 }
 
 os_capabilities! {
-    /// <https://developer.apple.com/documentation/uikit/uiview/2891103-safeareainsets?language=objc>
+    /// https://developer.apple.com/documentation/uikit/uiview/2891103-safeareainsets?language=objc
     #[allow(unused)] // error message unused
     safe_area_err_msg: "-[UIView safeAreaInsets]",
     safe_area: 11-0,
-    /// <https://developer.apple.com/documentation/uikit/uiviewcontroller/2887509-setneedsupdateofhomeindicatoraut?language=objc>
+    /// https://developer.apple.com/documentation/uikit/uiviewcontroller/2887509-setneedsupdateofhomeindicatoraut?language=objc
     home_indicator_hidden_err_msg: "-[UIViewController setNeedsUpdateOfHomeIndicatorAutoHidden]",
     home_indicator_hidden: 11-0,
-    /// <https://developer.apple.com/documentation/uikit/uiviewcontroller/2887507-setneedsupdateofscreenedgesdefer?language=objc>
+    /// https://developer.apple.com/documentation/uikit/uiviewcontroller/2887507-setneedsupdateofscreenedgesdefer?language=objc
     defer_system_gestures_err_msg: "-[UIViewController setNeedsUpdateOfScreenEdgesDeferringSystem]",
     defer_system_gestures: 11-0,
-    /// <https://developer.apple.com/documentation/uikit/uiscreen/2806814-maximumframespersecond?language=objc>
+    /// https://developer.apple.com/documentation/uikit/uiscreen/2806814-maximumframespersecond?language=objc
     maximum_frames_per_second_err_msg: "-[UIScreen maximumFramesPerSecond]",
     maximum_frames_per_second: 10-3,
-    /// <https://developer.apple.com/documentation/uikit/uitouch/1618110-force?language=objc>
+    /// https://developer.apple.com/documentation/uikit/uitouch/1618110-force?language=objc
     #[allow(unused)] // error message unused
     force_touch_err_msg: "-[UITouch force]",
     force_touch: 9-0,
@@ -1016,27 +1016,29 @@ impl NSOperatingSystemVersion {
 }
 
 pub fn os_capabilities() -> OSCapabilities {
-    static OS_CAPABILITIES: Lazy<OSCapabilities> = Lazy::new(|| {
-        let version: NSOperatingSystemVersion = unsafe {
-            let process_info: id = msg_send![class!(NSProcessInfo), processInfo];
-            let atleast_ios_8: BOOL = msg_send![
-                process_info,
-                respondsToSelector: sel!(operatingSystemVersion)
-            ];
-            // winit requires atleast iOS 8 because no one has put the time into supporting earlier os versions.
-            // Older iOS versions are increasingly difficult to test. For example, Xcode 11 does not support
-            // debugging on devices with an iOS version of less than 8. Another example, in order to use an iOS
-            // simulator older than iOS 8, you must download an older version of Xcode (<9), and at least Xcode 7
-            // has been tested to not even run on macOS 10.15 - Xcode 8 might?
-            //
-            // The minimum required iOS version is likely to grow in the future.
-            assert!(
-                atleast_ios_8 == YES,
-                "`winit` requires iOS version 8 or greater"
-            );
-            msg_send![process_info, operatingSystemVersion]
+    lazy_static! {
+        static ref OS_CAPABILITIES: OSCapabilities = {
+            let version: NSOperatingSystemVersion = unsafe {
+                let process_info: id = msg_send![class!(NSProcessInfo), processInfo];
+                let atleast_ios_8: BOOL = msg_send![
+                    process_info,
+                    respondsToSelector: sel!(operatingSystemVersion)
+                ];
+                // winit requires atleast iOS 8 because no one has put the time into supporting earlier os versions.
+                // Older iOS versions are increasingly difficult to test. For example, Xcode 11 does not support
+                // debugging on devices with an iOS version of less than 8. Another example, in order to use an iOS
+                // simulator older than iOS 8, you must download an older version of Xcode (<9), and at least Xcode 7
+                // has been tested to not even run on macOS 10.15 - Xcode 8 might?
+                //
+                // The minimum required iOS version is likely to grow in the future.
+                assert!(
+                    atleast_ios_8 == YES,
+                    "`winit` requires iOS version 8 or greater"
+                );
+                msg_send![process_info, operatingSystemVersion]
+            };
+            version.into()
         };
-        version.into()
-    });
+    }
     OS_CAPABILITIES.clone()
 }

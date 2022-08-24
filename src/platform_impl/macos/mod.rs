@@ -1,5 +1,4 @@
 #![cfg(target_os = "macos")]
-#![allow(clippy::let_unit_value)]
 
 #[macro_use]
 mod util;
@@ -70,7 +69,7 @@ impl Deref for Window {
 }
 
 impl Window {
-    pub(crate) fn new<T: 'static>(
+    pub fn new<T: 'static>(
         _window_target: &EventLoopWindowTarget<T>,
         attributes: WindowAttributes,
         pl_attribs: PlatformSpecificWindowBuilderAttributes,

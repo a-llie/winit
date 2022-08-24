@@ -5,14 +5,15 @@ use std::{
     os::raw::*,
 };
 
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 use super::*;
 
 type AtomCache = HashMap<CString, ffi::Atom>;
 
-static ATOM_CACHE: Lazy<Mutex<AtomCache>> = Lazy::new(|| Mutex::new(HashMap::with_capacity(2048)));
+lazy_static! {
+    static ref ATOM_CACHE: Mutex<AtomCache> = Mutex::new(HashMap::with_capacity(2048));
+}
 
 impl XConnection {
     pub fn get_atom<T: AsRef<CStr> + Debug>(&self, name: T) -> ffi::Atom {
